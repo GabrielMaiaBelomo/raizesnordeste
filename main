@@ -1,0 +1,118 @@
+from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import Optional, List
+
+app = FastAPI(title="Raízes do Nordeste API")
+
+# Banco de dados em memória (simples)
+produtos = []
+pedidos = []
+clientes = []
+
+
+# Modelos
+class Produto(BaseModel):
+    id: int
+    nome: str
+    preco: float
+    disponivel: bool = True
+    sazonal: bool = False
+
+
+class Cliente(BaseModel):
+    id: int
+    nome: str
+    email: str
+    consentimento_lgpd: bool
+
+
+class ItemPedido(BaseModel):
+    produto_id: int
+    quantidade: int
+
+
+class Pedido(BaseModel):
+    id: int
+    cliente_id: int
+    unidade: str
+    canal: str  # APP, TOTEM, BALCAO
+    itens: List[ItemPedido]
+    status: str = "AGUARDANDO_PAGAMENTO"
+    total: float = 0.0
+
+
+# Endpoints de Produtos
+@app.get("/produtos", tags=["Produtos"])
+def listar_produtos():
+    return produtos
+
+
+@app.post("/produtos", tags=["Produtos"])
+def criar_produto(produto: Produto):
+    produtos.append(produto)
+    return {"mensagem": "Produto criado com sucesso", "produto": produto}
+
+
+# Endpoints de Clientes
+@app.get("/clientes", tags=["Clientes"])
+def listar_clientes():
+    return clientes
+
+
+@app.post("/clientes", tags=["Clientes"])
+def criar_cliente(cliente: Cliente):
+    if not cliente.consentimento_lgpd:
+        return {"erro": "Cliente precisa dar consentimento LGPD"}
+    clientes.append(cliente)
+    return {"mensagem": "Cliente criado com sucesso", "cliente": cliente}
+
+
+# Endpoints de Pedidos
+@app.get("/pedidos", tags=["Pedidos"])
+def listar_pedidos():
+    return pedidos
+
+
+@app.post("/pedidos", tags=["Pedidos"])
+def criar_pedido(pedido: Pedido):
+    # Valida cliente
+    cliente = next((c for c in clientes if c.id == pedido.cliente_id), None)
+    if not cliente:
+        return {"erro": "Cliente não encontrado"}
+
+    # Valida canal
+    canais_validos = ["APP", "TOTEM", "BALCAO", "PICKUP"]
+    if pedido.canal not in canais_validos:
+        return {"erro": f"Canal inválido. Use: {canais_validos}"}
+
+    # Calcula total
+    total = 0
+    for item in pedido.itens:
+        produto = next((p for p in produtos if p.id == item.produto_id), None)
+        if not produto:
+            return {"erro": f"Produto {item.produto_id} não encontrado"}
+        if not produto.disponivel:
+            return {"erro": f"Produto {produto.nome} não está disponível"}
+        total += produto.preco * item.quantidade
+
+    pedido.id = len(pedidos) + 1
+    pedido.total = total
+    pedidos.append(pedido)
+    return {"mensagem": "Pedido criado com sucesso", "pedido": pedido}
+
+
+@app.post("/pedidos/{pedido_id}/pagamento", tags=["Pedidos"])
+def processar_pagamento(pedido_id: int):
+    pedido = next((p for p in pedidos if p.id == pedido_id), None)
+    if not pedido:
+        return {"erro": "Pedido não encontrado"}
+    if pedido.status != "AGUARDANDO_PAGAMENTO":
+        return {"erro": "Pedido não está aguardando pagamento"}
+
+    # Gateway mock
+    if pedido.total <= 1000:
+        pedido.status = "PAGAMENTO_APROVADO"
+        return {"mensagem": "Pagamento aprovado!", "total": pedido.total}
+    else:
+        pedido.status = "CANCELADO"
+        return {"mensagem": "Pagamento recusado - valor acima do limite", "total": pedido.total}
