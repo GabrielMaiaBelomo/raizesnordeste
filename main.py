@@ -48,11 +48,25 @@ class ClienteDB(Base):
     email = Column(String, unique=True)
     consentimento_lgpd = Column(Boolean, default=False)
 
+class UnidadeDB(Base):
+    __tablename__ = "unidades"
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String)
+    cidade = Column(String)
+    ativa = Column(Boolean, default=True)
+
+class EstoqueDB(Base):
+    __tablename__ = "estoques"
+    id = Column(Integer, primary_key=True, index=True)
+    unidade_id = Column(Integer, ForeignKey("unidades.id"))
+    produto_id = Column(Integer, ForeignKey("produtos.id"))
+    quantidade = Column(Integer, default=0)
+
 class PedidoDB(Base):
     __tablename__ = "pedidos"
     id = Column(Integer, primary_key=True, index=True)
     cliente_id = Column(Integer, ForeignKey("clientes.id"))
-    unidade = Column(String)
+    unidade_id = Column(Integer, ForeignKey("unidades.id"))
     canal = Column(String)
     status = Column(String, default="AGUARDANDO_PAGAMENTO")
     total = Column(Float, default=0.0)
@@ -110,6 +124,16 @@ class UsuarioSchema(BaseModel):
     senha: str
     role: str = "CLIENTE"
 
+class UnidadeSchema(BaseModel):
+    nome: str
+    cidade: str
+    ativa: bool = True
+
+class EstoqueSchema(BaseModel):
+    unidade_id: int
+    produto_id: int
+    quantidade: int
+
 class ProdutoSchema(BaseModel):
     nome: str
     preco: float
@@ -127,7 +151,7 @@ class ItemPedidoSchema(BaseModel):
 
 class PedidoSchema(BaseModel):
     cliente_id: int
-    unidade: str
+    unidade_id: int
     canal: str
     itens: List[ItemPedidoSchema]
 
@@ -154,6 +178,39 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
         raise HTTPException(status_code=401, detail="Email ou senha inválidos")
     token = criar_token({"sub": usuario.email, "role": usuario.role})
     return {"access_token": token, "token_type": "bearer"}
+
+# Endpoints Unidades
+@app.get("/unidades", tags=["Unidades"])
+def listar_unidades(db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
+    return db.query(UnidadeDB).all()
+
+@app.post("/unidades", tags=["Unidades"])
+def criar_unidade(unidade: UnidadeSchema, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
+    db_unidade = UnidadeDB(**unidade.dict())
+    db.add(db_unidade)
+    db.commit()
+    db.refresh(db_unidade)
+    return {"mensagem": "Unidade criada com sucesso", "unidade": db_unidade}
+
+# Endpoints Estoque
+@app.get("/estoques", tags=["Estoque"])
+def listar_estoques(db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
+    return db.query(EstoqueDB).all()
+
+@app.post("/estoques", tags=["Estoque"])
+def criar_estoque(estoque: EstoqueSchema, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
+    db_estoque = EstoqueDB(**estoque.dict())
+    db.add(db_estoque)
+    db.commit()
+    db.refresh(db_estoque)
+    return {"mensagem": "Estoque criado com sucesso", "estoque": db_estoque}
+
+@app.get("/estoques/unidade/{unidade_id}", tags=["Estoque"])
+def estoque_por_unidade(unidade_id: int, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
+    estoques = db.query(EstoqueDB).filter(EstoqueDB.unidade_id == unidade_id).all()
+    if not estoques:
+        raise HTTPException(status_code=404, detail="Nenhum estoque encontrado para esta unidade")
+    return estoques
 
 # Endpoints Produtos (protegidos)
 @app.get("/produtos", tags=["Produtos"])
@@ -210,10 +267,20 @@ def criar_pedido(pedido: PedidoSchema, db: Session = Depends(get_db), usuario=De
             raise HTTPException(status_code=404, detail=f"Produto {item.produto_id} não encontrado")
         if not produto.disponivel:
             raise HTTPException(status_code=400, detail=f"Produto {produto.nome} não disponível")
+
+        # Valida estoque por unidade
+        estoque = db.query(EstoqueDB).filter(
+            EstoqueDB.unidade_id == pedido.unidade_id,
+            EstoqueDB.produto_id == item.produto_id
+        ).first()
+        if not estoque or estoque.quantidade < item.quantidade:
+            raise HTTPException(status_code=409,
+                                detail=f"Estoque insuficiente para o produto {produto.nome} na unidade")
+
         total += produto.preco * item.quantidade
     db_pedido = PedidoDB(
         cliente_id=pedido.cliente_id,
-        unidade=pedido.unidade,
+        unidade_id=pedido.unidade_id,
         canal=pedido.canal,
         status="AGUARDANDO_PAGAMENTO",
         total=total
