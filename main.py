@@ -1,9 +1,18 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+
+# Configurações JWT
+SECRET_KEY = "raizes-nordeste-secret-key-2026"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 # Configuração do banco SQLite
 DATABASE_URL = "sqlite:///./raizes.db"
@@ -11,7 +20,19 @@ engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Modelos do banco de dados
+# Criptografia de senha
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+
+# Modelos do banco
+class UsuarioDB(Base):
+    __tablename__ = "usuarios"
+    id = Column(Integer, primary_key=True, index=True)
+    nome = Column(String)
+    email = Column(String, unique=True)
+    senha = Column(String)
+    role = Column(String, default="CLIENTE")
+
 class ProdutoDB(Base):
     __tablename__ = "produtos"
     id = Column(Integer, primary_key=True, index=True)
@@ -45,12 +66,10 @@ class ItemPedidoDB(Base):
     quantidade = Column(Integer)
     pedido = relationship("PedidoDB", back_populates="itens")
 
-# Cria as tabelas
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Raízes do Nordeste API")
 
-# Dependency
 def get_db():
     db = SessionLocal()
     try:
@@ -58,7 +77,39 @@ def get_db():
     finally:
         db.close()
 
-# Schemas Pydantic
+# Funções JWT
+def verificar_senha(senha, hash):
+    return pwd_context.verify(senha, hash)
+
+def hash_senha(senha):
+    return pwd_context.hash(senha)
+
+def criar_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+def get_usuario_atual(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=401, detail="Token inválido")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token inválido")
+    usuario = db.query(UsuarioDB).filter(UsuarioDB.email == email).first()
+    if usuario is None:
+        raise HTTPException(status_code=401, detail="Usuário não encontrado")
+    return usuario
+
+# Schemas
+class UsuarioSchema(BaseModel):
+    nome: str
+    email: str
+    senha: str
+    role: str = "CLIENTE"
+
 class ProdutoSchema(BaseModel):
     nome: str
     preco: float
@@ -80,26 +131,50 @@ class PedidoSchema(BaseModel):
     canal: str
     itens: List[ItemPedidoSchema]
 
-# Endpoints Produtos
+# Endpoints Auth
+@app.post("/auth/registro", tags=["Auth"])
+def registrar(usuario: UsuarioSchema, db: Session = Depends(get_db)):
+    existente = db.query(UsuarioDB).filter(UsuarioDB.email == usuario.email).first()
+    if existente:
+        raise HTTPException(status_code=400, detail="Email já cadastrado")
+    db_usuario = UsuarioDB(
+        nome=usuario.nome,
+        email=usuario.email,
+        senha=hash_senha(usuario.senha),
+        role=usuario.role
+    )
+    db.add(db_usuario)
+    db.commit()
+    return {"mensagem": "Usuário registrado com sucesso"}
+
+@app.post("/auth/login", tags=["Auth"])
+def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    usuario = db.query(UsuarioDB).filter(UsuarioDB.email == form.username).first()
+    if not usuario or not verificar_senha(form.password, usuario.senha):
+        raise HTTPException(status_code=401, detail="Email ou senha inválidos")
+    token = criar_token({"sub": usuario.email, "role": usuario.role})
+    return {"access_token": token, "token_type": "bearer"}
+
+# Endpoints Produtos (protegidos)
 @app.get("/produtos", tags=["Produtos"])
-def listar_produtos(db: Session = Depends(get_db)):
+def listar_produtos(db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
     return db.query(ProdutoDB).all()
 
 @app.post("/produtos", tags=["Produtos"])
-def criar_produto(produto: ProdutoSchema, db: Session = Depends(get_db)):
+def criar_produto(produto: ProdutoSchema, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
     db_produto = ProdutoDB(**produto.dict())
     db.add(db_produto)
     db.commit()
     db.refresh(db_produto)
     return {"mensagem": "Produto criado com sucesso", "produto": db_produto}
 
-# Endpoints Clientes
+# Endpoints Clientes (protegidos)
 @app.get("/clientes", tags=["Clientes"])
-def listar_clientes(db: Session = Depends(get_db)):
+def listar_clientes(db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
     return db.query(ClienteDB).all()
 
 @app.post("/clientes", tags=["Clientes"])
-def criar_cliente(cliente: ClienteSchema, db: Session = Depends(get_db)):
+def criar_cliente(cliente: ClienteSchema, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
     if not cliente.consentimento_lgpd:
         raise HTTPException(status_code=400, detail="Cliente precisa dar consentimento LGPD")
     db_cliente = ClienteDB(**cliente.dict())
@@ -108,31 +183,26 @@ def criar_cliente(cliente: ClienteSchema, db: Session = Depends(get_db)):
     db.refresh(db_cliente)
     return {"mensagem": "Cliente criado com sucesso", "cliente": db_cliente}
 
-# Endpoints Pedidos
+# Endpoints Pedidos (protegidos)
 @app.get("/pedidos", tags=["Pedidos"])
-def listar_pedidos(db: Session = Depends(get_db)):
+def listar_pedidos(db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
     return db.query(PedidoDB).all()
 
 @app.get("/pedidos/{pedido_id}", tags=["Pedidos"])
-def buscar_pedido(pedido_id: int, db: Session = Depends(get_db)):
+def buscar_pedido(pedido_id: int, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
     pedido = db.query(PedidoDB).filter(PedidoDB.id == pedido_id).first()
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido não encontrado")
     return pedido
 
 @app.post("/pedidos", tags=["Pedidos"])
-def criar_pedido(pedido: PedidoSchema, db: Session = Depends(get_db)):
-    # Valida cliente
+def criar_pedido(pedido: PedidoSchema, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
     cliente = db.query(ClienteDB).filter(ClienteDB.id == pedido.cliente_id).first()
     if not cliente:
         raise HTTPException(status_code=404, detail="Cliente não encontrado")
-
-    # Valida canal
     canais_validos = ["APP", "TOTEM", "BALCAO", "PICKUP"]
     if pedido.canal not in canais_validos:
         raise HTTPException(status_code=400, detail=f"Canal inválido. Use: {canais_validos}")
-
-    # Calcula total
     total = 0.0
     for item in pedido.itens:
         produto = db.query(ProdutoDB).filter(ProdutoDB.id == item.produto_id).first()
@@ -141,8 +211,6 @@ def criar_pedido(pedido: PedidoSchema, db: Session = Depends(get_db)):
         if not produto.disponivel:
             raise HTTPException(status_code=400, detail=f"Produto {produto.nome} não disponível")
         total += produto.preco * item.quantidade
-
-    # Cria pedido
     db_pedido = PedidoDB(
         cliente_id=pedido.cliente_id,
         unidade=pedido.unidade,
@@ -153,8 +221,6 @@ def criar_pedido(pedido: PedidoSchema, db: Session = Depends(get_db)):
     db.add(db_pedido)
     db.commit()
     db.refresh(db_pedido)
-
-    # Cria itens
     for item in pedido.itens:
         db_item = ItemPedidoDB(
             pedido_id=db_pedido.id,
@@ -163,25 +229,20 @@ def criar_pedido(pedido: PedidoSchema, db: Session = Depends(get_db)):
         )
         db.add(db_item)
     db.commit()
-
     return {"mensagem": "Pedido criado com sucesso", "pedido_id": db_pedido.id, "total": total, "status": db_pedido.status}
 
-# Endpoint Pagamento
 @app.post("/pedidos/{pedido_id}/pagamento", tags=["Pedidos"])
-def processar_pagamento(pedido_id: int, db: Session = Depends(get_db)):
+def processar_pagamento(pedido_id: int, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
     pedido = db.query(PedidoDB).filter(PedidoDB.id == pedido_id).first()
     if not pedido:
         raise HTTPException(status_code=404, detail="Pedido não encontrado")
     if pedido.status != "AGUARDANDO_PAGAMENTO":
         raise HTTPException(status_code=409, detail="Pedido não está aguardando pagamento")
-
-    # Gateway mock
     if pedido.total <= 1000:
         pedido.status = "PAGAMENTO_APROVADO"
         mensagem = "Pagamento aprovado!"
     else:
         pedido.status = "CANCELADO"
         mensagem = "Pagamento recusado - valor acima do limite"
-
     db.commit()
     return {"mensagem": mensagem, "total": pedido.total, "status": pedido.status}
