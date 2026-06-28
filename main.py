@@ -308,8 +308,19 @@ def processar_pagamento(pedido_id: int, db: Session = Depends(get_db), usuario=D
     if pedido.total <= 1000:
         pedido.status = "PAGAMENTO_APROVADO"
         mensagem = "Pagamento aprovado!"
+
+        # Debita estoque após pagamento aprovado
+        itens = db.query(ItemPedidoDB).filter(ItemPedidoDB.pedido_id == pedido_id).all()
+        for item in itens:
+            estoque = db.query(EstoqueDB).filter(
+                EstoqueDB.unidade_id == pedido.unidade_id,
+                EstoqueDB.produto_id == item.produto_id
+            ).first()
+            if estoque:
+                estoque.quantidade -= item.quantidade
     else:
         pedido.status = "CANCELADO"
         mensagem = "Pagamento recusado - valor acima do limite"
+
     db.commit()
     return {"mensagem": mensagem, "total": pedido.total, "status": pedido.status}
