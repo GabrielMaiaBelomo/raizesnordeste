@@ -116,7 +116,10 @@ def get_usuario_atual(token: str = Depends(oauth2_scheme), db: Session = Depends
     if usuario is None:
         raise HTTPException(status_code=401, detail="Usuário não encontrado")
     return usuario
-
+def requer_admin(usuario=Depends(get_usuario_atual)):
+    if usuario.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="Acesso restrito a administradores")
+    return usuario
 # Schemas
 class UsuarioSchema(BaseModel):
     nome: str
@@ -185,7 +188,7 @@ def listar_unidades(db: Session = Depends(get_db), usuario=Depends(get_usuario_a
     return db.query(UnidadeDB).all()
 
 @app.post("/unidades", tags=["Unidades"])
-def criar_unidade(unidade: UnidadeSchema, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
+def criar_unidade(unidade: UnidadeSchema, db: Session = Depends(get_db), usuario=Depends(requer_admin)):
     db_unidade = UnidadeDB(**unidade.dict())
     db.add(db_unidade)
     db.commit()
@@ -198,7 +201,7 @@ def listar_estoques(db: Session = Depends(get_db), usuario=Depends(get_usuario_a
     return db.query(EstoqueDB).all()
 
 @app.post("/estoques", tags=["Estoque"])
-def criar_estoque(estoque: EstoqueSchema, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
+def criar_estoque(estoque: EstoqueSchema, db: Session = Depends(get_db), usuario=Depends(requer_admin)):
     db_estoque = EstoqueDB(**estoque.dict())
     db.add(db_estoque)
     db.commit()
@@ -218,7 +221,7 @@ def listar_produtos(db: Session = Depends(get_db), usuario=Depends(get_usuario_a
     return db.query(ProdutoDB).all()
 
 @app.post("/produtos", tags=["Produtos"])
-def criar_produto(produto: ProdutoSchema, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
+def criar_produto(produto: ProdutoSchema, db: Session = Depends(get_db), usuario=Depends(requer_admin)):
     db_produto = ProdutoDB(**produto.dict())
     db.add(db_produto)
     db.commit()
@@ -244,6 +247,73 @@ def criar_cliente(cliente: ClienteSchema, db: Session = Depends(get_db), usuario
 @app.get("/pedidos", tags=["Pedidos"])
 def listar_pedidos(db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
     return db.query(PedidoDB).all()
+
+
+@app.get("/pedidos/{pedido_id}", tags=["Pedidos"])
+def buscar_pedido(pedido_id: int, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
+    pedido = db.query(PedidoDB).filter(PedidoDB.id == pedido_id).first()
+    if not pedido:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado")
+    return pedido
+
+
+@app.patch("/pedidos/{pedido_id}/status", tags=["Pedidos"])
+def atualizar_status(pedido_id: int, status: str, db: Session = Depends(get_db), usuario=Depends(requer_admin)):
+    pedido = db.query(PedidoDB).filter(PedidoDB.id == pedido_id).first()
+    if not pedido:
+        raise HTTPException(status_code=404, detail="Pedido não encontrado")
+
+    status_validos = ["AGUARDANDO_PAGAMENTO", "PAGAMENTO_APROVADO", "EM_PREPARO", "PRONTO", "ENTREGUE", "CANCELADO"]
+    if status not in status_validos:
+        raise HTTPException(status_code=400, detail=f"Status inválido. Use: {status_validos}")
+
+    pedido.status = status
+    db.commit()
+    return {"mensagem": "Status atualizado com sucesso", "pedido_id": pedido_id, "novo_status": status}
+
+
+@app.get("/relatorios/vendas", tags=["Relatórios"])
+def relatorio_vendas(db: Session = Depends(get_db), usuario=Depends(requer_admin)):
+    pedidos = db.query(PedidoDB).filter(PedidoDB.status == "PAGAMENTO_APROVADO").all()
+
+    vendas_por_unidade = {}
+    for pedido in pedidos:
+        unidade = db.query(UnidadeDB).filter(UnidadeDB.id == pedido.unidade_id).first()
+        nome_unidade = unidade.nome if unidade else f"Unidade {pedido.unidade_id}"
+
+        if nome_unidade not in vendas_por_unidade:
+            vendas_por_unidade[nome_unidade] = {
+                "total_pedidos": 0,
+                "total_vendas": 0.0
+            }
+        vendas_por_unidade[nome_unidade]["total_pedidos"] += 1
+        vendas_por_unidade[nome_unidade]["total_vendas"] += pedido.total
+
+    return {
+        "relatorio": "Vendas por unidade",
+        "dados": vendas_por_unidade
+    }
+
+
+@app.get("/relatorios/produtos", tags=["Relatórios"])
+def relatorio_produtos(db: Session = Depends(get_db), usuario=Depends(requer_admin)):
+    itens = db.query(ItemPedidoDB).all()
+
+    produtos_vendidos = {}
+    for item in itens:
+        produto = db.query(ProdutoDB).filter(ProdutoDB.id == item.produto_id).first()
+        nome_produto = produto.nome if produto else f"Produto {item.produto_id}"
+
+        if nome_produto not in produtos_vendidos:
+            produtos_vendidos[nome_produto] = {
+                "quantidade_vendida": 0
+            }
+        produtos_vendidos[nome_produto]["quantidade_vendida"] += item.quantidade
+
+    return {
+        "relatorio": "Produtos mais vendidos",
+        "dados": produtos_vendidos
+    }
 
 @app.get("/pedidos/{pedido_id}", tags=["Pedidos"])
 def buscar_pedido(pedido_id: int, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
