@@ -80,10 +80,19 @@ class ItemPedidoDB(Base):
     quantidade = Column(Integer)
     pedido = relationship("PedidoDB", back_populates="itens")
 
+class AuditoriaDB(Base):
+    __tablename__ = "auditoria"
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_email = Column(String)
+    acao = Column(String)
+    entidade = Column(String)
+    entidade_id = Column(Integer)
+    detalhes = Column(String)
+    data_hora = Column(String)
+
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Raízes do Nordeste API")
-
 def get_db():
     db = SessionLocal()
     try:
@@ -120,6 +129,18 @@ def requer_admin(usuario=Depends(get_usuario_atual)):
     if usuario.role != "ADMIN":
         raise HTTPException(status_code=403, detail="Acesso restrito a administradores")
     return usuario
+
+def registrar_auditoria(db: Session, usuario_email: str, acao: str, entidade: str, entidade_id: int, detalhes: str = ""):
+    log = AuditoriaDB(
+        usuario_email=usuario_email,
+        acao=acao,
+        entidade=entidade,
+        entidade_id=entidade_id,
+        detalhes=detalhes,
+        data_hora=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    )
+    db.add(log)
+    db.commit()
 # Schemas
 class UsuarioSchema(BaseModel):
     nome: str
@@ -269,6 +290,14 @@ def atualizar_status(pedido_id: int, status: str, db: Session = Depends(get_db),
 
     pedido.status = status
     db.commit()
+    registrar_auditoria(
+        db=db,
+        usuario_email=usuario.email,
+        acao="ATUALIZAR_STATUS",
+        entidade="Pedido",
+        entidade_id=pedido_id,
+        detalhes=f"Novo status: {status}"
+    )
     return {"mensagem": "Status atualizado com sucesso", "pedido_id": pedido_id, "novo_status": status}
 
 
@@ -314,6 +343,10 @@ def relatorio_produtos(db: Session = Depends(get_db), usuario=Depends(requer_adm
         "relatorio": "Produtos mais vendidos",
         "dados": produtos_vendidos
     }
+
+@app.get("/auditoria", tags=["Auditoria"])
+def listar_auditoria(db: Session = Depends(get_db), usuario=Depends(requer_admin)):
+    return db.query(AuditoriaDB).all()
 
 @app.get("/pedidos/{pedido_id}", tags=["Pedidos"])
 def buscar_pedido(pedido_id: int, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
@@ -393,4 +426,12 @@ def processar_pagamento(pedido_id: int, db: Session = Depends(get_db), usuario=D
         mensagem = "Pagamento recusado - valor acima do limite"
 
     db.commit()
+    registrar_auditoria(
+        db=db,
+        usuario_email=usuario.email,
+        acao="PAGAMENTO",
+        entidade="Pedido",
+        entidade_id=pedido_id,
+        detalhes=f"Status: {pedido.status} | Total: {pedido.total}"
+    )
     return {"mensagem": mensagem, "total": pedido.total, "status": pedido.status}
