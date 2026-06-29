@@ -348,12 +348,6 @@ def relatorio_produtos(db: Session = Depends(get_db), usuario=Depends(requer_adm
 def listar_auditoria(db: Session = Depends(get_db), usuario=Depends(requer_admin)):
     return db.query(AuditoriaDB).all()
 
-@app.get("/pedidos/{pedido_id}", tags=["Pedidos"])
-def buscar_pedido(pedido_id: int, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
-    pedido = db.query(PedidoDB).filter(PedidoDB.id == pedido_id).first()
-    if not pedido:
-        raise HTTPException(status_code=404, detail="Pedido não encontrado")
-    return pedido
 
 @app.post("/pedidos", tags=["Pedidos"])
 def criar_pedido(pedido: PedidoSchema, db: Session = Depends(get_db), usuario=Depends(get_usuario_atual)):
